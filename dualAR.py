@@ -45,25 +45,25 @@ class RQTransformer(torch.nn.Module):
         pth["audio_decoder.output.weight"]=pth["audio_decoder.output.weight"][:acoustic_size] # eliminate redundant computations
         self.load_state_dict({k.replace("text_model.model.","").replace("audio_decoder.","fast_").replace("attention.","").replace("feed_forward.",""):v for k,v in pth.items()})
     
-    # refer to VALLE2 https://arxiv.org/abs/2406.05370, Repetition Aware Sampling for semantic token, greedy decoding for acoustic
-    def forward(self,x,input_pos,previous_tokens,mask,temperature=1.0,top_p=0.95,top_k=50): 
+    def sample(self,logits,temperature=1.0,top_p=0.95,top_k=50):
+        logit_sort,idx_sort=logits.sort(dim=-1,descending=True)
+        idx_mask=((logit_sort>=logit_sort[:,top_k])&(logit_sort.softmax(-1).cumsum(-1)<=top_p))|(logit_sort==logit_sort[:,0])
+        logits=torch.where(idx_mask.scatter(dim=-1,index=idx_sort,src=idx_mask),logits,float("-Inf"))
+        return ((logits/max(temperature,1e-5)).softmax(-1)/torch.empty_like(logits).exponential_(1)).argmax(-1,keepdim=True)
+
+    # Repetition Aware + Random(top-k & top-p & Temperature) Sampling for semantic token, Random Sampling for acoustic token
+    def forward(self,x,input_pos,previous_tokens,mask,temperature=1.0,top_p=0.95,top_k=50,temperature_high=1.0,top_p_high=0.9,RAS_num=1): 
         for layer in self.layers: 
             x=layer(x,input_pos,self.rope_cache[:,:,input_pos],mask)
         x=self.norm(x[:,-1:,:]) # correct, prefill flops: 2*(p_slow*toks+9*p_fast*1), 4070m FP8 MFU: 0.43
         logits=self.output(x)[:,0,:]
         
         # Repetition Aware Sampling allow 0 repetitions -> Hard Masking
-        logits.scatter_(1,previous_tokens,float('-inf')); logit_sort,idx_sort=logits.sort(dim=-1,descending=True)
-        idx_mask=((logit_sort>=logit_sort[:,top_k])&(logit_sort.softmax(-1).cumsum(-1)<=top_p))|(logit_sort==logit_sort[:,0])
-        logits=torch.where(idx_mask.scatter(dim=-1,index=idx_sort,src=idx_mask),logits,float("-Inf"))
-        idx=((logits/max(temperature,1e-5)).softmax(-1)/torch.empty_like(logits).exponential_(1)).argmax(-1,keepdim=True)
-        
-        # Multinomial sample
-        # idx=(logits.softmax(-1)/torch.empty_like(logits).exponential_(1)).argmax(-1,keepdim=True)
+        logits.scatter_(1,previous_tokens,float('-inf')); idx=self.sample(logits,temperature,top_p,top_k)
 
         # FishSpeech Repetition Aware Sampling
-        # idx=(logits_to_probs(logits,temperature,top_p,top_k)/torch.empty_like(logits).exponential_(1)).argmax(-1)
-        # idx_high=(logits_to_probs(logits,temperature,top_p_high,top_k)/torch.empty_like(logits).exponential_(1)).argmax(-1)
+        # idx=self.sample(logits,temperature,top_p,top_k)
+        # idx_high=self.sample(logits,temperature_high,top_p_high,top_k)
         # idx=torch.where((previous_tokens==idx).sum(1,keepdim=True)>=RAS_num,idx_high,idx)
 
         rvq=torch.zeros([x.shape[0],11],dtype=torch.int32,device=x.device)
@@ -72,16 +72,16 @@ class RQTransformer(torch.nn.Module):
         x=torch.cat([x,self.fast_embeddings(rvq[:,1:2].clamp(max=4096-1))],dim=1) # concat hidden and semantic emb to prefill: 10 step -> 9 step
         for layer in self.fast_layers:
             x=layer(x,None,self.rope_cache[:,:,:2,:,:],None,0) # block_mask got bug here
-        rvq[:,2]=self.fast_output(self.fast_norm(x[:,-1,:])).argmax(-1)
+        rvq[:,2]=self.sample(self.fast_output(self.fast_norm(x[:,-1,:])),temperature,top_p,top_k)
         for fast_pos in range(2,10):
             x=self.fast_embeddings(rvq[:,fast_pos:fast_pos+1])
             for layer in self.fast_layers: 
                 x=layer(x,None,self.rope_cache[:,:,fast_pos:fast_pos+1,:,:],None,fast_pos)
-            rvq[:,fast_pos+1]=self.fast_output(self.fast_norm(x[:,-1,:])).argmax(-1)
+            rvq[:,fast_pos+1]=self.sample(self.fast_output(self.fast_norm(x[:,-1,:])),temperature,top_p,top_k)
         return rvq
 
 class Generator:
-    def __init__(self,rank=0,weight_path="./s2-pro",quant="bfloat16",batch=1,max_context=1024,RAS_window=7,num_codebooks=10,codebook_size=4096):
+    def __init__(self,rank=0,weight_path="./s2-pro",quant="bfloat16",batch=1,max_context=1024,RAS_window=10,num_codebooks=10,codebook_size=4096):
         quants=dict(bfloat16=2,int8wo=1,fp8=1,int4wo=0.5,nvfp4=0.5)
         assert quant in quants.keys()
         self.model=RQTransformer(n_layer=36).eval().to(rank)
@@ -190,9 +190,9 @@ if __name__=="__main__":
     ]
 
     for i,text in enumerate(text_list_zh):
-        codes=generator.generate(prompt_text,prompt_tokens,text)
+        codes=generator.generate(prompt_text,prompt_tokens,text,temperature=0.7,top_p=0.7,top_k=30)
         open(f"./examples/generate/output{i}_zh.code","wb").write(codes.cpu().to(torch.int16).numpy().tobytes())
 
     for i,text in enumerate(text_list_en):
-        codes=generator.generate(prompt_text,prompt_tokens,text)
+        codes=generator.generate(prompt_text,prompt_tokens,text,temperature=0.7,top_p=0.7,top_k=30)
         open(f"./examples/generate/output{i}_en.code","wb").write(codes.cpu().to(torch.int16).numpy().tobytes())

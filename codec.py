@@ -219,7 +219,7 @@ def CausalWNConvTranspose1d(*args, **kwargs):
 #                              激活函数
 # ==============================================================================
 
-@torch.jit.script
+@torch.compile
 def snake(x, alpha):
     """
     Snake 激活函数（JIT 编译加速）
@@ -826,13 +826,14 @@ class Transformer(nn.Module):
         self.layers = nn.ModuleList(TransformerBlock(config) for _ in range(config.n_layer))
         self.norm = RMSNorm(config.dim, eps=config.norm_eps)
 
-        if config.pos_embed_type == "rope":
-            freqs_cis = precompute_freqs_cis(327680, self.config.head_dim, self.config.rope_base)
+        if config.pos_embed_type == "rope": # encoder 86Hz, quantizer 21Hz
+            freqs_cis = precompute_freqs_cis(32768, self.config.head_dim, self.config.rope_base)
             self.register_buffer("freqs_cis", freqs_cis, persistent=False)
         else:
             self.register_buffer("freqs_cis", None)
 
-        causal_mask = torch.tril(torch.ones(32768, 32768, dtype=torch.bool))
+        # causal_mask = torch.tril(torch.ones(32768, 32768, dtype=torch.bool))
+        causal_mask = None
         self.register_buffer("causal_mask", causal_mask, persistent=False)
 
         self.max_batch_size = -1
@@ -1252,9 +1253,9 @@ def get_model():
 # ==============================================================================
 
 if __name__=="__main__":
-    import torch,torchaudio
+    import torch
     import pathlib,sys
-    import tqdm,soundfile
+    import tqdm,soundfile,soxr
     # from codec import get_model
 
     class Codec:
@@ -1262,14 +1263,16 @@ if __name__=="__main__":
             self.SAMPLE_RATE,self.DEVICE,self.DTYPE=44100,rank,DTYPE
             self.fishcodec=get_model().eval().to(dtype=self.DTYPE).to(device=self.DEVICE)
             self.fishcodec.load_state_dict(torch.load(codec_path,map_location="cpu"),strict=False)
-            if compile: self.fishcodec=torch.compile(self.fishcodec)
+            if compile: 
+                self.fishcodec.encode=torch.compile(self.fishcodec.encode)
+                self.fishcodec.decode=torch.compile(self.fishcodec.decode)
 
         def encode(self,wave_path=None,code_path=None,wave=None):
             if wave_path!=None:
-                wave,sr=soundfile.read(wave_path,always_2d=True); wave=torch.FloatTensor(wave).T # for torch >= 2.9.0
-                if wave.size(0)>1: wave=wave.mean(dim=0,keepdim=True)
-                if sr!=self.SAMPLE_RATE:wave=torchaudio.functional.resample(wave,orig_freq=sr,new_freq=self.SAMPLE_RATE)
-                wave=wave.to(device=self.DEVICE,dtype=self.DTYPE)
+                wave,sr=soundfile.read(wave_path,always_2d=True) # soundfile + soxr, remove torchaudio 
+                if wave.shape[1]>1: wave=wave.mean(axis=1,keepdims=True)
+                if sr!=self.SAMPLE_RATE: wave=soxr.resample(wave,sr,self.SAMPLE_RATE) 
+                wave=torch.FloatTensor(wave).T.to(device=self.DEVICE,dtype=self.DTYPE)
             elif wave==None: return None
 
             with torch.inference_mode():
@@ -1290,7 +1293,7 @@ if __name__=="__main__":
             if wave_path!=None: soundfile.write(wave_path,(audio.cpu().clamp(-1.0,1.0)*32767)[:,None].to(torch.int16).numpy(),self.SAMPLE_RATE)
             else: return audio
 
-    encodec=Codec()
+    encodec=Codec(codec_path="./s2-pro/codec.pth")
     if len(sys.argv)>1 and sys.argv[1]=="encode":
         for wave_path in tqdm.tqdm(list([p for p in pathlib.Path("./examples/prompt").glob("*") if p.suffix[1:].upper() in soundfile._formats])):
             encodec.encode(wave_path,wave_path.with_suffix(".code"))

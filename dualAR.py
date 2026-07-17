@@ -37,7 +37,7 @@ class RQTransformer(torch.nn.Module):
         self.norm,self.fast_norm=[torch.nn.RMSNorm(C,eps=1e-6,dtype=dtype) for _ in range(2)]
         self.output,self.fast_output=[torch.nn.Linear(C,vocab,bias=False,dtype=dtype) for vocab in [codebook_size+1,acoustic_size]]
         self.rope_cache=torch.nn.Buffer(torch.stack([f(torch.tensor([[j*base**(-i/(Cattn//A/2)) for i in range(Cattn//A//2)] for j in range(max_len)])) for f in (torch.cos,torch.sin)],dim=-1)[None,None,:],persistent=False)
-        self.rope_cache=self.rope_cache.to(torch.bfloat16).float() # fishspeech s2-prp was trained with pure bfloat16
+        self.rope_cache=self.rope_cache.to(torch.bfloat16).float() # fishspeech s2-pro was trained with pure bfloat16
 
     def load_weights(self,weight_path,shards=2,s=151678,e=155773,eos=151645,acoustic_size=1024):
         pth=dict(); [pth.update(load_file(f"{weight_path}/model-0000{i+1}-of-00002.safetensors",device="cpu")) for i in range(shards)]

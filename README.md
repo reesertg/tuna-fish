@@ -13,7 +13,7 @@ Featuring:
 2. Achieved fullgraph in dualAR decode stage, and got considerable decoding speed on H20 GPU with 135 token/s
 3. Clean dependence, only pytorch and safetensors/soundfile/tokenizers was needed
 4. Support int8/fp8/int4/nvfp4 quantization. Due to the simplicity of the code, you can easily use various quantization methods in [torchao](https://github.com/pytorch/ao)
-
+5. ‌Minimized Hardware Requirements, Only 8GB GPU needed to run the online inference web app with both dualAR (fp8) and codec (fp16)
 
 ### Inference 
 
@@ -22,8 +22,8 @@ Featuring:
 > fishaudio s2-pro model weights are released under FISH AUDIO RESEARCH LICENSE. Please refer to [LICENSE](https://github.com/fishaudio/fish-speech/blob/main/LICENSE) for more details.
 
 ```bash
-uv pip install -U --pre torch torchao torchaudio --index-url https://download.pytorch.org/whl/nightly/cu132
-uv pip install safetensors tokenizers soundfile
+uv pip install -U --pre torch torchao --index-url https://download.pytorch.org/whl/nightly/cu132
+uv pip install tqdm safetensors tokenizers soundfile soxr
 # install mslk for torchao NVFP4 Quantized Inference  
 # uv pip install -U --pre mslk --index-url https://download.pytorch.org/whl/nightly/cu132
 
@@ -51,7 +51,7 @@ python codec.py encode
 # Generate RVQ codes based on the given prompt_text, prompt_tokens and text
 # you can run fishspeech s2-pro on 8GB GPU
 # quantize + compile may take several minutes at first run
-# got prefill 5000~6000 token/s decode 26~27 token/s on RTX 4070 Laptop GPU with fp8 quantization and batch 1
+# got prefill 5000~6000 token/s decode 26~27 token/s on RTX 4070 Laptop GPU with fp8 quantization with batch 1
 python dualAR.py
 ```
 
@@ -63,7 +63,7 @@ python codec.py
 
 ### web app
 ```bash
-# You may need >16GB of GPU memory to load both codec and dualAR
+# You can use 8GB GPU to run app with both codec(fp16) and dualAR(fp8)
 python app.py
 ```
 

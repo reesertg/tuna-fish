@@ -1,5 +1,5 @@
-import torch,torchaudio
-import soundfile
+import torch
+import soundfile,soxr
 from codec import get_model
 from dualAR import Generator
 import gradio as gr
@@ -8,18 +8,20 @@ import gradio as gr
 def Demo(rank=0,weights_path="./s2-pro",max_context=1024,port=7560):
     fishcodec=get_model().eval().to(dtype=torch.float16).to(rank) # using bfloat16 in the decoder will result in significant background noise
     fishcodec.load_state_dict(torch.load(f"{weights_path}/codec.pth",map_location="cpu"),strict=False)
-    # fishcodec=torch.compile(fishcodec) # compile codec maybe a litter quicker
+    # compile codec maybe a litter quicker
+    # fishcodec.encode=torch.compile(fishcodec.encode)
+    # fishcodec.decode=torch.compile(fishcodec.decode)
 
-    generator=Generator(rank,weights_path,quant="bfloat16",max_context=max_context)
+    generator=Generator(rank,weights_path,quant="fp8",max_context=max_context)
     generator.prefill=torch.compile(generator.prefill,mode="default",fullgraph=True,dynamic=True) # default or max-autotune-no-cudagraphs
     generator.decode=torch.compile(generator.decode,mode="reduce-overhead",fullgraph=True) # reduce-overhead or max-autotune with fullgraph=True
     
     def process_upload(prompt_text,prompt_wave,text,temperature=1.0,top_p=0.95,top_k=50):
         # read wave
-        wave,sr=soundfile.read(prompt_wave,always_2d=True); wave=torch.FloatTensor(wave).T # for torch >= 2.9.0
-        if wave.size(0)>1: wave=wave.mean(dim=0,keepdim=True)
-        if sr!=44100:wave=torchaudio.functional.resample(wave,orig_freq=sr,new_freq=44100)
-        wave=wave.to(device=rank,dtype=torch.float16)
+        wave,sr=soundfile.read(prompt_wave,always_2d=True) # soundfile + soxr, remove torchaudio 
+        if wave.shape[1]>1: wave=wave.mean(axis=1,keepdims=True)
+        if sr!=44100: wave=soxr.resample(wave,sr,44100) 
+        wave=torch.FloatTensor(wave).T.to(device=rank,dtype=torch.float16)
 
         # encode
         with torch.inference_mode():
@@ -33,7 +35,7 @@ def Demo(rank=0,weights_path="./s2-pro",max_context=1024,port=7560):
         with torch.inference_mode():
             z=fishcodec.quantizer.decode(code)
             audio=fishcodec.decoder(z)[0,0].float()
-
+        torch.cuda.empty_cache()
         return 44100,(audio.cpu().clamp(-1.0,1.0)*32767)[:,None].to(torch.int16).numpy()
 
     demo=gr.Interface(
